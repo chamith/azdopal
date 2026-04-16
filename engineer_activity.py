@@ -90,6 +90,39 @@ def _flush_repo_to_db(
     conn.commit()
 
 
+def _fetch_pr_line_counts(client: ADOClient, repo_id: str, pr_id: int) -> tuple[int, int]:
+    """
+    Fetch lines added and deleted for a PR via its iterations.
+    Returns (lines_added, lines_deleted). Returns (0, 0) on failure.
+    """
+    try:
+        data = client.get(
+            f"/git/repositories/{repo_id}/pullrequests/{pr_id}/iterations",
+            {"includeCommits": "false"},
+        )
+        iterations = data.get("value", [])
+        if not iterations:
+            return 0, 0
+        # Use the last iteration (most recent) for the overall diff stats
+        last = iterations[-1]
+        stats = last.get("changeList", {})
+        # ADO doesn't return line counts in iterations directly —
+        # use the iteration changes endpoint for the last iteration
+        iter_id = last.get("id")
+        changes_data = client.get(
+            f"/git/repositories/{repo_id}/pullrequests/{pr_id}/iterations/{iter_id}/changes"
+        )
+        added = 0
+        deleted = 0
+        for change in changes_data.get("changeEntries", []):
+            counts = change.get("lineCounts", {})
+            added += counts.get("added", 0)
+            deleted += counts.get("deleted", 0)
+        return added, deleted
+    except RuntimeError:
+        return 0, 0
+
+
 def _scan_repo(
     client: ADOClient,
     repo: dict,
@@ -140,9 +173,11 @@ def _scan_repo(
                 review_hours = round((closed - created).total_seconds() / 3600, 2)
 
             source_branch = pr.get("sourceRefName", "").replace("refs/heads/", "")
+            pr_id = pr.get("pullRequestId")
+            lines_added, lines_deleted = _fetch_pr_line_counts(client, repo_id, pr_id)
             entry = {
                 "repo": repo_name,
-                "pr_id": pr.get("pullRequestId"),
+                "pr_id": pr_id,
                 "title": pr.get("title"),
                 "status": pr.get("status"),
                 "source_branch": source_branch,
@@ -150,9 +185,11 @@ def _scan_repo(
                 "created_date": pr.get("creationDate"),
                 "closed_date": pr.get("closedDate"),
                 "review_time_hours": review_hours,
+                "lines_added": lines_added,
+                "lines_deleted": lines_deleted,
                 "url": (
                     f"https://dev.azure.com/{client.org}/{client.project}"
-                    f"/_git/{repo_name}/pullrequest/{pr.get('pullRequestId')}"
+                    f"/_git/{repo_name}/pullrequest/{pr_id}"
                 ),
             }
             prs_by_eng[creator_email].append(entry)

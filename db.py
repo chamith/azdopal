@@ -69,6 +69,8 @@ def init_db(db_path: Path = DB_PATH):
                 created_date    TEXT,
                 closed_date     TEXT,
                 review_time_hours REAL,
+                lines_added     INTEGER,
+                lines_deleted   INTEGER,
                 url             TEXT,
                 updated_at      TEXT    NOT NULL,
                 PRIMARY KEY (pr_id, repo, period, engineer_email)
@@ -101,7 +103,66 @@ def init_db(db_path: Path = DB_PATH):
 
             CREATE INDEX IF NOT EXISTS idx_repos_name
                 ON repos (name);
+
+            CREATE TABLE IF NOT EXISTS work_items (
+                id              INTEGER NOT NULL,
+                period          TEXT    NOT NULL,
+                engineer_email  TEXT    NOT NULL,
+                title           TEXT,
+                type            TEXT,
+                state           TEXT,
+                area_path       TEXT,
+                iteration_path  TEXT,
+                story_points    REAL,
+                effort          REAL,
+                remaining_work  REAL,
+                created_date    TEXT,
+                changed_date    TEXT,
+                url             TEXT,
+                updated_at      TEXT    NOT NULL,
+                PRIMARY KEY (id, period, engineer_email)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_wi_engineer
+                ON work_items (engineer_email);
+            CREATE INDEX IF NOT EXISTS idx_wi_period
+                ON work_items (period);
+            CREATE INDEX IF NOT EXISTS idx_wi_type
+                ON work_items (type);
+            CREATE INDEX IF NOT EXISTS idx_wi_state
+                ON work_items (state);
+
+            CREATE TABLE IF NOT EXISTS sprints (
+                id              TEXT    PRIMARY KEY,
+                name            TEXT    NOT NULL,
+                path            TEXT,
+                start_date      TEXT,
+                end_date        TEXT,
+                time_frame      TEXT,
+                updated_at      TEXT    NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sprints_name
+                ON sprints (name);
+            CREATE INDEX IF NOT EXISTS idx_sprints_dates
+                ON sprints (start_date, end_date);
+
+            CREATE TABLE IF NOT EXISTS teams (
+                id          TEXT    PRIMARY KEY,
+                name        TEXT    NOT NULL UNIQUE,
+                description TEXT,
+                updated_at  TEXT    NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_teams_name
+                ON teams (name);
         """)
+        # Migrate existing DBs — add columns if they don't exist yet
+        for col, typedef in [("lines_added", "INTEGER"), ("lines_deleted", "INTEGER")]:
+            try:
+                conn.execute(f"ALTER TABLE pull_requests ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass  # column already exists
 
 
 def upsert_activity(
@@ -163,8 +224,8 @@ def upsert_pr(conn: sqlite3.Connection, period: str, engineer_email: str, pr: di
         INSERT INTO pull_requests
             (pr_id, repo, period, engineer_email, title, status,
              source_branch, target_branch, created_date, closed_date,
-             review_time_hours, url, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             review_time_hours, lines_added, lines_deleted, url, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (pr_id, repo, period, engineer_email)
         DO UPDATE SET
             title             = excluded.title,
@@ -174,6 +235,8 @@ def upsert_pr(conn: sqlite3.Connection, period: str, engineer_email: str, pr: di
             created_date      = excluded.created_date,
             closed_date       = excluded.closed_date,
             review_time_hours = excluded.review_time_hours,
+            lines_added       = excluded.lines_added,
+            lines_deleted     = excluded.lines_deleted,
             url               = excluded.url,
             updated_at        = excluded.updated_at
     """, (
@@ -188,7 +251,136 @@ def upsert_pr(conn: sqlite3.Connection, period: str, engineer_email: str, pr: di
         pr.get("created_date"),
         pr.get("closed_date"),
         pr.get("review_time_hours"),
+        pr.get("lines_added"),
+        pr.get("lines_deleted"),
         pr.get("url"),
+        updated_at,
+    ))
+
+
+def upsert_team(conn: sqlite3.Connection, team: dict):
+    updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute("""
+        INSERT INTO teams (id, name, description, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET
+            name        = excluded.name,
+            description = excluded.description,
+            updated_at  = excluded.updated_at
+    """, (
+        team.get("id"),
+        team.get("name"),
+        team.get("description"),
+        updated_at,
+    ))
+
+
+def list_teams(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute("SELECT * FROM teams ORDER BY name").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_team_by_name(conn: sqlite3.Connection, name: str) -> dict | None:
+    row = conn.execute("SELECT * FROM teams WHERE name = ? LIMIT 1", (name,)).fetchone()
+    if not row:
+        row = conn.execute(
+            "SELECT * FROM teams WHERE name LIKE ? LIMIT 1", (f"%{name}%",)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_sprint(conn: sqlite3.Connection, sprint: dict):
+    updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute("""
+        INSERT INTO sprints (id, name, path, start_date, end_date, time_frame, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (id) DO UPDATE SET
+            name       = excluded.name,
+            path       = excluded.path,
+            start_date = excluded.start_date,
+            end_date   = excluded.end_date,
+            time_frame = excluded.time_frame,
+            updated_at = excluded.updated_at
+    """, (
+        sprint.get("id"),
+        sprint.get("name"),
+        sprint.get("path"),
+        sprint.get("start_date"),
+        sprint.get("end_date"),
+        sprint.get("time_frame"),
+        updated_at,
+    ))
+
+
+def get_sprint_by_name(conn: sqlite3.Connection, name: str) -> dict | None:
+    """Find a sprint by exact name, number suffix, or partial name match."""
+    # Exact match first
+    row = conn.execute(
+        "SELECT * FROM sprints WHERE name = ? LIMIT 1", (name,)
+    ).fetchone()
+    if row:
+        return dict(row)
+    # If input is a number, match "Sprint {number}", "Iteration {number}" etc. exactly
+    if name.strip().isdigit():
+        for pattern in (f"Sprint {name.strip()}", f"Sprint{name.strip()}",
+                        f"Iteration {name.strip()}", f"Iteration{name.strip()}"):
+            row = conn.execute(
+                "SELECT * FROM sprints WHERE name = ? LIMIT 1", (pattern,)
+            ).fetchone()
+            if row:
+                return dict(row)
+    # Partial match — prefer most recent
+    row = conn.execute(
+        "SELECT * FROM sprints WHERE name LIKE ? ORDER BY start_date DESC LIMIT 1",
+        (f"%{name}%",)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_sprints(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM sprints ORDER BY start_date DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_work_item(conn: sqlite3.Connection, period: str, engineer_email: str, item: dict):
+    updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute("""
+        INSERT INTO work_items
+            (id, period, engineer_email, title, type, state, area_path,
+             iteration_path, story_points, effort, remaining_work,
+             created_date, changed_date, url, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (id, period, engineer_email)
+        DO UPDATE SET
+            title          = excluded.title,
+            type           = excluded.type,
+            state          = excluded.state,
+            area_path      = excluded.area_path,
+            iteration_path = excluded.iteration_path,
+            story_points   = excluded.story_points,
+            effort         = excluded.effort,
+            remaining_work = excluded.remaining_work,
+            created_date   = excluded.created_date,
+            changed_date   = excluded.changed_date,
+            url            = excluded.url,
+            updated_at     = excluded.updated_at
+    """, (
+        item.get("id"),
+        period,
+        engineer_email,
+        item.get("title"),
+        item.get("type"),
+        item.get("state"),
+        item.get("area_path"),
+        item.get("iteration_path"),
+        item.get("story_points"),
+        item.get("effort"),
+        item.get("remaining_work"),
+        item.get("created_date"),
+        item.get("changed_date"),
+        item.get("url"),
         updated_at,
     ))
 

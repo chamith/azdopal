@@ -36,38 +36,50 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Engineer activity (commits & PRs)
+### Fetch — pull data from Azure DevOps into the DB
 
 ```bash
+# All engineers, all repos
+python3 fetch.py engineer --from 01-04-2026 --to 15-04-2026
+
 # Single engineer
-python3 cli.py engineer --eng x.y@amusedgroup.com --from 01-04-2026 --to 15-04-2026
+python3 fetch.py engineer --eng x.y@amusedgroup.com --from 01-04-2026 --to 15-04-2026
 
-# All engineers (discovered from data)
-python3 cli.py engineer --from 01-04-2026 --to 15-04-2026
+# Filter by repo pattern
+python3 fetch.py engineer --from 01-04-2026 --to 15-04-2026 -n "Sports.*,Racing.*"
 
-# Filter by repo namespace/pattern
-python3 cli.py engineer --from 01-04-2026 --to 15-04-2026 -n "Sports.*,Racing.*"
+# PR/commit metrics for the configured single repo
+python3 fetch.py prs --days 30
+python3 fetch.py commits --days 60
 ```
 
-### PR metrics (single repo)
+### View — query the local database
 
 ```bash
-python3 cli.py prs
-python3 cli.py prs --days 30 --output pr_report.json
-```
+# Summary table: all engineers for a period
+python3 view.py summary --from 01-04-2026 --to 15-04-2026
 
-### Commit activity (single repo)
+# Summary for a specific engineer
+python3 view.py summary --from 01-04-2026 --to 15-04-2026 --eng thanura
 
-```bash
-python3 cli.py commits
-python3 cli.py commits --days 60 --output commits.json
+# List commits for an engineer
+python3 view.py commits --from 01-04-2026 --to 15-04-2026 --eng thanura
+
+# List commits filtered by repo
+python3 view.py commits --from 01-04-2026 --to 15-04-2026 --eng thanura --repo Sports
+
+# List PRs for an engineer
+python3 view.py prs --from 01-04-2026 --to 15-04-2026 --eng thanura
+
+# List only completed PRs
+python3 view.py prs --from 01-04-2026 --to 15-04-2026 --eng thanura --status completed
 ```
 
 ### Repo utilities
 
 ```bash
-python3 cli.py dedup-repos       # remove duplicates from repos.json
-python3 cli.py split-repos       # split repos.json into per-namespace files
+python3 fetch.py dedup-repos       # remove duplicates from repos.json
+python3 fetch.py split-repos       # split repos.json into per-namespace files
 ```
 
 ## Database
@@ -92,7 +104,9 @@ sqlite3 azdopal.db "SELECT repo, branch, message FROM commits WHERE engineer_ema
 
 ```
 azdopal/
-├── cli.py                  # Entry point — all CLI commands (click)
+├── fetch.py                # Entry point — fetch commands (pulls from ADO → DB)
+├── view.py                 # Entry point — view commands (queries DB → console)
+├── common.py               # Shared helpers (date parsing, repo pattern loading, error handling)
 ├── client.py               # Azure DevOps REST API client with retry/backoff
 ├── engineer_activity.py    # Core fetch logic — scans repos for commits & PRs
 ├── db.py                   # SQLite helpers — schema, upserts, queries
