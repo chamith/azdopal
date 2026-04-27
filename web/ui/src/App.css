@@ -1,0 +1,109 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f6fa; color: #1a1a2e; }
+
+.app { display: flex; flex-direction: column; min-height: 100vh; }
+
+/* Header */
+.header { display: flex; align-items: center; gap: 1.5rem; padding: 0.75rem 1.5rem; background: #1a1a2e; color: #fff; flex-wrap: wrap; }
+.logo { font-size: 1.25rem; font-weight: 700; color: #7c83fd; letter-spacing: 0.05em; }
+.nav { display: flex; gap: 1rem; }
+.nav a { color: #ccc; text-decoration: none; font-size: 0.9rem; padding: 0.25rem 0.5rem; border-radius: 4px; }
+.nav a.active { color: #fff; background: #7c83fd33; }
+.filters { display: flex; gap: 0.75rem; margin-left: auto; }
+.filters select { padding: 0.35rem 0.6rem; border-radius: 6px; border: 1px solid #444; background: #2a2a3e; color: #fff; font-size: 0.85rem; }
+
+/* Main */
+.main { flex: 1; padding: 1.5rem; max-width: 1200px; width: 100%; margin: 0 auto; }
+
+/* Page title */
+.page-title { font-size: 1.3rem; font-weight: 600; margin-bottom: 1rem; }
+.period { color: #7c83fd; }
+.period-label { color: #666; font-size: 0.9rem; margin-bottom: 1rem; }
+.team-badge { margin-left: 0.75rem; background: #7c83fd22; color: #7c83fd; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.8rem; }
+
+/* Stat cards */
+.stat-cards { display: flex; gap: 1rem; margin-bottom: 1.5rem; }
+.stat-card { background: #fff; border-radius: 10px; padding: 1rem 1.5rem; box-shadow: 0 1px 4px #0001; min-width: 120px; }
+.stat-value { font-size: 2rem; font-weight: 700; color: #7c83fd; }
+.stat-label { font-size: 0.8rem; color: #888; margin-top: 0.25rem; }
+
+/* Table */
+.data-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 10px; overflow: hidden; box-shadow: 0 1px 4px #0001; }
+.data-table th { background: #f0f1ff; padding: 0.65rem 1rem; text-align: left; font-size: 0.8rem; color: #555; text-transform: uppercase; letter-spacing: 0.05em; }
+.data-table td { padding: 0.65rem 1rem; border-top: 1px solid #f0f0f0; font-size: 0.9rem; }
+.data-table tr.clickable:hover { background: #f7f8ff; cursor: pointer; }
+.data-table .num { text-align: right; }
+.data-table .date { white-space: nowrap; color: #888; font-size: 0.85rem; }
+.data-table .mono { font-family: monospace; font-size: 0.82rem; color: #555; }
+.data-table a { color: #7c83fd; text-decoration: none; }
+.data-table a:hover { text-decoration: underline; }
+
+/* Tabs */
+.tabs { display: flex; gap: 0.5rem; margin-bottom: 1.25rem; }
+.tab { padding: 0.4rem 1rem; border: 1px solid #ddd; border-radius: 6px; background: #fff; cursor: pointer; font-size: 0.9rem; color: #555; }
+.tab.active { background: #7c83fd; color: #fff; border-color: #7c83fd; }
+
+/* Back button */
+.back-btn { background: none; border: none; color: #7c83fd; cursor: pointer; font-size: 0.9rem; margin-bottom: 1rem; padding: 0; }
+.back-btn:hover { text-decoration: underline; }
+
+/* Badges */
+.badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.75rem; font-weight: 600; margin-right: 0.35rem; }
+.badge-completed { background: #d4edda; color: #155724; }
+.badge-active { background: #cce5ff; color: #004085; }
+.badge-abandoned { background: #f8d7da; color: #721c24; }
+.badge-type { background: #e8eaff; color: #3a3fd4; }
+.badge-state { background: #fff3cd; color: #856404; }
+
+/* Work item cards */
+.wi-list { display: flex; flex-direction: column; gap: 0.6rem; }
+.wi-card { background: #fff; border-radius: 8px; padding: 0.75rem 1rem; box-shadow: 0 1px 3px #0001; }
+.wi-header { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; }
+.wi-id { color: #aaa; font-size: 0.8rem; }
+.wi-title { color: #1a1a2e; text-decoration: none; font-size: 0.9rem; flex: 1; }
+.wi-title:hover { color: #7c83fd; }
+.wi-meta { display: flex; gap: 1rem; margin-top: 0.4rem; font-size: 0.8rem; color: #888; }
+.wi-date { margin-left: auto; }
+.wi-prs { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.4rem; }
+.pr-link { font-size: 0.78rem; color: #7c83fd; text-decoration: none; background: #f0f1ff; padding: 0.15rem 0.5rem; border-radius: 4px; }
+.pr-link:hover { background: #e0e2ff; }
+
+/* Engineer sections */
+.eng-section { margin-bottom: 1.5rem; }
+.eng-name { font-size: 0.95rem; font-weight: 600; color: #555; margin-bottom: 0.6rem; padding-bottom: 0.4rem; border-bottom: 1px solid #eee; }
+.eng-name .count { font-weight: 400; color: #aaa; }
+
+/* Filter bar */
+.filter-bar { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem; flex-wrap: wrap; }
+.filter-input { padding: 0.4rem 0.75rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.9rem; min-width: 220px; }
+.filter-bar select { padding: 0.4rem 0.6rem; border: 1px solid #ddd; border-radius: 6px; font-size: 0.9rem; }
+.filter-count { margin-left: auto; color: #888; font-size: 0.85rem; }
+
+/* States */
+.loading, .empty, .error { padding: 2rem; text-align: center; color: #888; }
+.error { color: #c0392b; }
+
+/* Hierarchy indentation */
+.wi-list > div > .wi-card { border-left: 3px solid #7c83fd44; }
+.wi-list > div > div > .wi-card { border-left: 3px solid #e0e2ff; margin-top: 4px; }
+
+/* Collapse toggle */
+.collapse-btn { background: none; border: none; cursor: pointer; font-size: 0.7rem; color: #888; padding: 0 0.3rem; margin-right: 0.25rem; width: 1.2rem; text-align: center; }
+.collapse-btn:hover { color: #7c83fd; }
+.collapse-spacer { display: inline-block; width: 1.2rem; margin-right: 0.25rem; }
+.child-count { font-size: 0.72rem; color: #aaa; margin-left: auto; }
+
+/* Sprints active indicator */
+.sprints-active { background: #e8f5e9; color: #2e7d32; padding: 0.1rem 0.4rem; border-radius: 8px; font-size: 0.75rem; font-weight: 600; }
+.sprints-active.warn { background: #fff3e0; color: #e65100; }
+
+/* Owner label */
+.wi-owner { color: #7c83fd; font-weight: 600; font-size: 0.8rem; }
+
+/* Summary table */
+.summary-table { max-width: 100%; margin-bottom: 1.5rem; }
+.summary-total td { border-top: 2px solid #ddd; }
+
+/* Spilled badge */
+.badge-spilled { background: #fce4ec; color: #c62828; font-size: 0.72rem; }

@@ -7,7 +7,7 @@ from client import ADOClient
 from pr_metrics import fetch_pr_metrics
 from commit_stats import fetch_commit_stats
 from engineer_activity import fetch_engineer_activity, fetch_all_engineers_activity
-from db import init_db, get_connection, get_all_repos, upsert_sprint, upsert_team, list_teams as db_list_teams
+from db import init_db, get_connection, get_all_repos, upsert_sprint, upsert_team, upsert_team_member, list_teams as db_list_teams
 from common import parse_date, load_repos_for_patterns, handle_errors, resolve_date_range, ENGINEERS_FILE, REPOS_FILE, REPOS_DIR
 
 
@@ -169,6 +169,92 @@ def backfill_periods():
 
 
 @cli.command()
+@click.option("--team", default=None, help="Sync members for a specific team (partial match). If omitted, syncs all teams.")
+@handle_errors
+def sync_team_members(team):
+    """Sync team members from Azure DevOps into the local DB."""
+    import requests as req
+
+    client = ADOClient()
+    init_db()
+
+    with get_connection() as conn:
+        if team:
+            from db import get_team_by_name
+            t = get_team_by_name(conn, team)
+            if not t:
+                raise click.UsageError(f"Team '{team}' not found. Run 'python3 fetch.py sync-teams' first.")
+            teams_to_sync = [t]
+        else:
+            teams_to_sync = db_list_teams(conn)
+            if not teams_to_sync:
+                raise click.UsageError("No teams in DB. Run 'python3 fetch.py sync-teams' first.")
+
+        total = 0
+        for t in teams_to_sync:
+            team_id = t["id"]
+            team_name = t["name"]
+            skip = 0
+            top = 100
+            team_total = 0
+
+            # First try the capacity endpoint for each sprint (gives actual sprint members)
+            # Fall back to the general members endpoint
+            from db import list_sprints as db_list_sprints
+            team_sprints = db_list_sprints(conn, team_name)
+            capacity_emails: set[str] = set()
+
+            for sprint in team_sprints[:10]:  # check recent sprints for capacity data
+                cap_url = f"https://dev.azure.com/{client.org}/{client.project}/{team_name}/_apis/work/teamsettings/iterations/{sprint['id']}/capacities"
+                cap_resp = req.get(cap_url, headers=client.headers,
+                                   params={"api-version": "7.1"}, timeout=30)
+                if cap_resp.ok:
+                    for cap in cap_resp.json().get("value", []):
+                        identity = cap.get("teamMember", {})
+                        email = identity.get("uniqueName", "").lower()
+                        display = identity.get("displayName", "")
+                        if email and email not in capacity_emails:
+                            capacity_emails.add(email)
+                            upsert_team_member(conn, team_id, team_name, email, display)
+                            team_total += 1
+
+            if capacity_emails:
+                conn.commit()
+                click.echo(f"  {team_name}: {len(capacity_emails)} members from capacity data.")
+                total += len(capacity_emails)
+                continue
+
+            # Fall back to general members endpoint with pagination
+            while True:
+                url = f"https://dev.azure.com/{client.org}/_apis/projects/{client.project}/teams/{team_id}/members"
+                response = req.get(url, headers=client.headers,
+                                   params={"api-version": "7.1", "$top": top, "$skip": skip},
+                                   timeout=30)
+                if not response.ok:
+                    click.echo(f"  Warning: could not fetch members for '{team_name}': {response.status_code}", err=True)
+                    break
+
+                members = response.json().get("value", [])
+                for m in members:
+                    identity = m.get("identity", {})
+                    email = identity.get("uniqueName", "").lower()
+                    display = identity.get("displayName", "")
+                    if email:
+                        upsert_team_member(conn, team_id, team_name, email, display)
+
+                conn.commit()
+                team_total += len(members)
+                if len(members) < top:
+                    break
+                skip += top
+
+            total += team_total
+            click.echo(f"  {team_name}: {team_total} members synced.")
+
+    click.echo(f"\nDone. {total} team member records saved to azdopal.db.")
+
+
+@cli.command()
 @handle_errors
 def sync_teams():
     """Sync all teams from Azure DevOps into the local DB."""
@@ -258,6 +344,7 @@ def sync_sprints(team):
                 upsert_sprint(conn, {
                     "id": it.get("id"),
                     "name": it.get("name"),
+                    "team_name": team_name,
                     "path": it.get("path"),
                     "start_date": attrs.get("startDate"),
                     "end_date": attrs.get("finishDate"),
@@ -271,20 +358,25 @@ def sync_sprints(team):
 
 
 @cli.command()
+@click.option("--team", default=None, help="Filter by team name (partial match).")
 @handle_errors
-def list_sprints():
+def list_sprints(team):
     """List all synced sprints."""
-    from db import list_sprints as db_list_sprints
+    from db import list_sprints as db_list_sprints, get_team_by_name
     init_db()
     with get_connection() as conn:
-        sprints = db_list_sprints(conn)
+        team_name = None
+        if team:
+            t = get_team_by_name(conn, team)
+            team_name = t["name"] if t else team
+        sprints = db_list_sprints(conn, team_name)
     if not sprints:
         click.echo("No sprints in DB. Run 'python3 fetch.py sync-sprints' first.")
         return
-    click.echo(f"\n{'Name':<40} {'Start':<12} {'End':<12} {'Timeframe'}")
-    click.echo("-" * 75)
+    click.echo(f"\n{'Name':<40} {'Team':<35} {'Start':<12} {'End':<12} {'Timeframe'}")
+    click.echo("-" * 105)
     for s in sprints:
-        click.echo(f"  {s['name']:<38} {(s['start_date'] or '')[:10]:<12} {(s['end_date'] or '')[:10]:<12} {s['time_frame'] or ''}")
+        click.echo(f"  {s['name']:<38} {s.get('team_name',''):<33} {(s['start_date'] or '')[:10]:<12} {(s['end_date'] or '')[:10]:<12} {s['time_frame'] or ''}")
 
 
 @cli.command()
@@ -331,106 +423,174 @@ def dedup_repos():
 @cli.command()
 @click.option("--from", "from_date", default=None, callback=parse_date, is_eager=True, help="Start date dd-mm-yyyy.")
 @click.option("--to", "to_date", default=None, callback=parse_date, is_eager=True, help="End date dd-mm-yyyy.")
-@click.option("--sprint", default=None, help="Sprint name (alternative to --from/--to).")
-@click.option("--eng", default=None, help="Engineer email. If omitted, reads from engineers.json or discovers all.")
+@click.option("--sprint", default=None, help="Sprint name or number (alternative to --from/--to).")
+@click.option("--team", default=None, help="Team name to scope the sprint lookup (partial match).")
+@click.option("--eng", default=None, help="Filter by engineer email. If omitted, fetches all items in the sprint.")
+@click.option("--with-pr-links", is_flag=True, default=False, help="Also fetch linked PRs for each work item (slower — one extra API call per item).")
 @handle_errors
-def work_items(from_date, to_date, sprint, eng):
-    """Fetch ADO work items assigned to engineers for a date range and save to DB."""
-    from db import upsert_work_item
+def work_items(from_date, to_date, sprint, team, eng, with_pr_links):
+    """Fetch ADO work items for a sprint/date range and save to DB.
 
-    if eng:
-        engineers = [eng]
-    else:
-        if ENGINEERS_FILE.exists():
-            engineers = json.loads(ENGINEERS_FILE.read_text()) or None
-            if engineers:
-                click.echo(f"Loaded {len(engineers)} engineers from {ENGINEERS_FILE}.", err=True)
-        else:
-            engineers = None
-        if engineers is None:
-            raise click.UsageError("--eng is required or engineers.json must exist for work-items fetch.")
+    Without --eng: fetches all work items in the sprint iteration path.
+    With --eng: fetches items assigned to that engineer.
+    """
+    from db import upsert_work_item
 
     client = ADOClient()
     init_db()
 
+    fields = [
+        "System.Id", "System.Title", "System.WorkItemType",
+        "System.State", "System.AreaPath", "System.IterationPath",
+        "System.AssignedTo", "System.Parent",
+        "Microsoft.VSTS.Common.ActivatedDate",
+        "Microsoft.VSTS.Common.ClosedDate",
+        "Microsoft.VSTS.Scheduling.StoryPoints",
+        "Microsoft.VSTS.Scheduling.Effort",
+        "Microsoft.VSTS.Scheduling.RemainingWork",
+        "Microsoft.VSTS.Scheduling.OriginalEstimate",
+        "Microsoft.VSTS.Scheduling.CompletedWork",
+        "System.CreatedDate", "System.ChangedDate",
+    ]
+
     with get_connection() as conn:
-        from_dt, to_dt, period = resolve_date_range(from_date, to_date, sprint, conn)
+        from_dt, to_dt, period = resolve_date_range(from_date, to_date, sprint, conn, team)
         from_str = from_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         to_str = to_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        for email in engineers:
-            click.echo(f"\nFetching work items for {email} ...", err=True)
-
-            # WIQL query — items assigned to engineer changed in the date range
+        if eng:
+            # Per-engineer mode: query by AssignedTo + date range
+            click.echo(f"\nFetching work items for {eng} in {period} ...", err=True)
             wiql = {
                 "query": f"""
-                    SELECT [System.Id]
-                    FROM WorkItems
-                    WHERE [System.AssignedTo] = '{email}'
+                    SELECT [System.Id] FROM WorkItems
+                    WHERE [System.AssignedTo] = '{eng}'
                     AND [System.ChangedDate] >= '{from_str}'
                     AND [System.ChangedDate] <= '{to_str}'
                     ORDER BY [System.ChangedDate] DESC
                 """
             }
+            _fetch_and_save_work_items(client, conn, wiql, fields, period, eng, with_pr_links)
+        elif team:
+            # Team mode: fetch all items in the team's sprint iteration path
+            from db import get_sprint_by_name, get_team_by_name
+            t = get_team_by_name(conn, team)
+            if not t:
+                raise click.UsageError(f"Team '{team}' not found. Run 'python3 fetch.py sync-teams' first.")
 
-            try:
-                result = client.post("/_apis/wit/wiql", wiql)
-            except RuntimeError as e:
-                click.echo(f"  Error querying work items: {e}", err=True)
-                continue
-
-            work_item_refs = result.get("workItems", [])
-            if not work_item_refs:
-                click.echo(f"  No work items found.", err=True)
-                continue
-
-            click.echo(f"  Found {len(work_item_refs)} work items. Fetching details...", err=True)
-
-            # Fetch details in batches of 200
-            ids = [str(r["id"]) for r in work_item_refs]
-            fields = [
-                "System.Id", "System.Title", "System.WorkItemType",
-                "System.State", "System.AreaPath", "System.IterationPath",
-                "Microsoft.VSTS.Scheduling.StoryPoints",
-                "Microsoft.VSTS.Scheduling.Effort",
-                "Microsoft.VSTS.Scheduling.RemainingWork",
-                "System.CreatedDate", "System.ChangedDate",
-            ]
-
-            for batch_start in range(0, len(ids), 200):
-                batch = ids[batch_start:batch_start + 200]
-                try:
-                    details = client.post(
-                        "/_apis/wit/workitemsbatch",
-                        {"ids": [int(i) for i in batch], "fields": fields},
-                    )
-                except RuntimeError as e:
-                    click.echo(f"  Error fetching batch: {e}", err=True)
-                    continue
-
-                for item in details.get("value", []):
-                    f = item.get("fields", {})
-                    wi = {
-                        "id": item.get("id"),
-                        "title": f.get("System.Title"),
-                        "type": f.get("System.WorkItemType"),
-                        "state": f.get("System.State"),
-                        "area_path": f.get("System.AreaPath"),
-                        "iteration_path": f.get("System.IterationPath"),
-                        "story_points": f.get("Microsoft.VSTS.Scheduling.StoryPoints"),
-                        "effort": f.get("Microsoft.VSTS.Scheduling.Effort"),
-                        "remaining_work": f.get("Microsoft.VSTS.Scheduling.RemainingWork"),
-                        "created_date": f.get("System.CreatedDate"),
-                        "changed_date": f.get("System.ChangedDate"),
-                        "url": f"https://dev.azure.com/{client.org}/{client.project}/_workitems/edit/{item.get('id')}",
-                    }
-                    upsert_work_item(conn, period, email, wi)
-
-                conn.commit()
-
-            click.echo(f"  Saved {len(work_item_refs)} work items to DB.", err=True)
+            # Get the sprint record scoped to this team
+            sprint_record = get_sprint_by_name(conn, sprint, t["name"]) if sprint else None
+            if sprint_record and sprint_record.get("path"):
+                iter_path = sprint_record["path"].replace("'", "''")
+                click.echo(f"\nFetching all work items in '{iter_path}' for team '{t['name']}' ...", err=True)
+                wiql = {
+                    "query": f"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] = '{iter_path}' ORDER BY [System.AssignedTo] ASC"
+                }
+                # assigned_to=None so each item uses its own AssignedTo field
+                _fetch_and_save_work_items(client, conn, wiql, fields, period, assigned_to=None, with_pr_links=with_pr_links)
+            else:
+                raise click.UsageError(f"Could not find iteration path for sprint '{sprint}' in team '{team}'. Run 'python3 fetch.py sync-sprints --team \"{team}\"' first.")
+        else:
+            # Sprint-wide mode: query by iteration path
+            # Get the sprint's iteration path from DB
+            from db import get_sprint_by_name
+            sprint_record = get_sprint_by_name(conn, sprint) if sprint else None
+            if sprint_record and sprint_record.get("path"):
+                iter_path = sprint_record["path"].replace("'", "''")  # escape single quotes
+                click.echo(f"\nFetching all work items in '{iter_path}' ({period}) ...", err=True)
+                wiql = {
+                    "query": f"SELECT [System.Id] FROM WorkItems WHERE [System.IterationPath] = '{iter_path}' ORDER BY [System.ChangedDate] DESC"
+                }
+            else:
+                # Fall back to date range with no engineer filter
+                click.echo(f"\nFetching all work items changed in {period} ...", err=True)
+                wiql = {
+                    "query": f"""
+                        SELECT [System.Id] FROM WorkItems
+                        WHERE [System.ChangedDate] >= '{from_str}'
+                        AND [System.ChangedDate] <= '{to_str}'
+                        ORDER BY [System.ChangedDate] DESC
+                    """
+                }
+            _fetch_and_save_work_items(client, conn, wiql, fields, period, assigned_to=None, with_pr_links=with_pr_links)
 
     click.echo(f"\nDone. Work items saved to azdopal.db.")
+
+
+def _fetch_and_save_work_items(client, conn, wiql: dict, fields: list,
+                                period: str, assigned_to: str | None,
+                                with_pr_links: bool = False) -> int:
+    """Returns the number of work items found."""
+    from db import upsert_work_item
+
+    try:
+        result = client.post("/wit/wiql", wiql)
+    except RuntimeError as e:
+        click.echo(f"  Error querying work items: {e}", err=True)
+        return 0
+
+    work_item_refs = result.get("workItems", [])
+    if not work_item_refs:
+        return 0
+
+    click.echo(f"  Found {len(work_item_refs)} work items.", err=True)
+    ids = [r["id"] for r in work_item_refs]
+
+    for batch_start in range(0, len(ids), 200):
+        batch = ids[batch_start:batch_start + 200]
+        try:
+            details = client.post("/wit/workitemsbatch", {"ids": batch, "fields": fields})
+        except RuntimeError as e:
+            click.echo(f"  Error fetching batch: {e}", err=True)
+            continue
+
+        for item in details.get("value", []):
+            f = item.get("fields", {})
+            assigned = assigned_to or (f.get("System.AssignedTo") or {}).get("uniqueName", "unassigned")
+            wi_id = item.get("id")
+            parent_id = f.get("System.Parent")
+            wi = {
+                "id": wi_id,
+                "title": f.get("System.Title"),
+                "type": f.get("System.WorkItemType"),
+                "state": f.get("System.State"),
+                "area_path": f.get("System.AreaPath"),
+                "iteration_path": f.get("System.IterationPath"),
+                "story_points": f.get("Microsoft.VSTS.Scheduling.StoryPoints"),
+                "effort": f.get("Microsoft.VSTS.Scheduling.Effort"),
+                "remaining_work": f.get("Microsoft.VSTS.Scheduling.RemainingWork"),
+                "original_estimate": f.get("Microsoft.VSTS.Scheduling.OriginalEstimate"),
+                "completed_work": f.get("Microsoft.VSTS.Scheduling.CompletedWork"),
+                "parent_id": parent_id,
+                "activated_date": f.get("Microsoft.VSTS.Common.ActivatedDate"),
+                "resolved_date": f.get("Microsoft.VSTS.Common.ClosedDate"),
+                "created_date": f.get("System.CreatedDate"),
+                "changed_date": f.get("System.ChangedDate"),
+                "url": f"https://dev.azure.com/{client.org}/{client.project}/_workitems/edit/{wi_id}",
+            }
+            upsert_work_item(conn, period, assigned, wi)
+
+            # Fetch relations separately to get linked PRs
+            if with_pr_links:
+                from db import upsert_work_item_pr
+                import re, time as _time
+                try:
+                    rel_data = client.get(f"/wit/workitems/{wi_id}", {"$expand": "relations"})
+                    for rel in rel_data.get("relations", []) or []:
+                        rel_url = rel.get("url", "")
+                        match = re.search(r'PullRequestId/[^/]+/([^/]+)/(\d+)', rel_url)
+                        if match:
+                            repo_name = match.group(1)
+                            pr_id = int(match.group(2))
+                            pr_url = f"https://dev.azure.com/{client.org}/{client.project}/_git/{repo_name}/pullrequest/{pr_id}"
+                            upsert_work_item_pr(conn, wi_id, period, pr_id, repo_name, pr_url)
+                    _time.sleep(0.1)  # avoid rate limiting
+                except RuntimeError:
+                    pass
+
+        conn.commit()
+
+    return len(work_item_refs)
 
 
 @cli.command()

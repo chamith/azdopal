@@ -19,24 +19,29 @@ def parse_date(ctx, param, value: str) -> datetime | None:
         raise click.BadParameter("Expected format: dd-mm-yyyy (e.g. 01-01-2026)")
 
 
-def resolve_date_range(from_date, to_date, sprint, conn) -> tuple[datetime, datetime, str]:
+def resolve_date_range(from_date, to_date, sprint, conn, team: str | None = None) -> tuple:
     """
     Resolve a date range from either explicit --from/--to or a --sprint name.
     Returns (from_dt, to_dt, period_label).
-    period_label is the sprint name if --sprint was used, otherwise the date range string.
     """
     if sprint:
-        s = get_sprint_by_name(conn, sprint)
+        from db import get_team_by_name
+        team_name = None
+        if team:
+            t = get_team_by_name(conn, team)
+            team_name = t["name"] if t else team
+        s = get_sprint_by_name(conn, sprint, team_name)
         if not s:
-            raise click.UsageError(
-                f"Sprint '{sprint}' not found in DB. Run 'python3 fetch.py sync-sprints' first."
-            )
+            msg = f"Sprint '{sprint}' not found in DB"
+            msg += f" for team '{team}'" if team else ""
+            raise click.UsageError(f"{msg}. Run 'python3 fetch.py sync-sprints' first.")
         if not s.get("start_date") or not s.get("end_date"):
             raise click.UsageError(f"Sprint '{sprint}' has no start/end dates in ADO.")
         from_dt = datetime.strptime(s["start_date"][:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         to_dt = datetime.strptime(s["end_date"][:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         period_label = s["name"]
-        click.echo(f"Sprint '{period_label}': {from_dt.date()} → {to_dt.date()}", err=True)
+        team_label = f" [{s.get('team_name', '')}]" if s.get("team_name") else ""
+        click.echo(f"Sprint '{period_label}'{team_label}: {from_dt.date()} → {to_dt.date()}", err=True)
         return from_dt, to_dt, period_label
     if not from_date or not to_date:
         raise click.UsageError("Provide either --sprint or both --from and --to.")
