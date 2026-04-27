@@ -107,3 +107,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
 
 /* Spilled badge */
 .badge-spilled { background: #fce4ec; color: #c62828; font-size: 0.72rem; }
+
+/* Chip filter groups */
+.filter-section { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1.25rem; }
+.chip-group { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem; }
+.chip-label { font-size: 0.78rem; color: #888; min-width: 80px; font-weight: 600; }
+.chip { padding: 0.25rem 0.6rem; border: 1px solid #ddd; border-radius: 16px; background: #fff; cursor: pointer; font-size: 0.78rem; color: #555; transition: all 0.15s; }
+.chip:hover { border-color: #7c83fd; color: #7c83fd; }
+.chip-active { background: #7c83fd; color: #fff; border-color: #7c83fd; }
+.chip-active:hover { background: #6a71e0; }
+.chip-clear { background: none; border: 1px solid #ddd; color: #aaa; font-size: 0.7rem; padding: 0.2rem 0.4rem; }
+.chip-clear:hover { color: #c62828; border-color: #c62828; }

@@ -88,12 +88,47 @@ function WICard({ wi, depth = 0 }: { wi: WorkItemWithChildren; depth?: number })
   );
 }
 
+/** Toggle a value in a Set — returns a new Set */
+function toggle<T>(set: Set<T>, value: T): Set<T> {
+  const next = new Set(set);
+  if (next.has(value)) next.delete(value);
+  else next.add(value);
+  return next;
+}
+
+function ChipGroup({ label, options, selected, onToggle }: {
+  label: string;
+  options: string[];
+  selected: Set<string>;
+  onToggle: (v: string) => void;
+}) {
+  return (
+    <div className="chip-group">
+      <span className="chip-label">{label}:</span>
+      {options.map(o => (
+        <button
+          key={o}
+          className={`chip ${selected.has(o) ? "chip-active" : ""}`}
+          onClick={() => onToggle(o)}
+        >
+          {o}
+        </button>
+      ))}
+      {selected.size > 0 && (
+        <button className="chip chip-clear" onClick={() => options.forEach(o => { if (selected.has(o)) onToggle(o); })}>
+          ✕
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function WorkItems({ period, team }: { period: string; team: string }) {
-  const [filterState, setFilterState] = useState("");
-  const [filterType, setFilterType] = useState("");
-  const [filterEng, setFilterEng] = useState("");
-  const [filterSpilled, setFilterSpilled] = useState("");
-  const [filterSprints, setFilterSprints] = useState("");
+  const [selStates, setSelStates] = useState<Set<string>>(new Set());
+  const [selTypes, setSelTypes] = useState<Set<string>>(new Set());
+  const [selEngs, setSelEngs] = useState<Set<string>>(new Set());
+  const [selSpilled, setSelSpilled] = useState<Set<string>>(new Set());
+  const [selSprints, setSelSprints] = useState<Set<string>>(new Set());
 
   const { data = [], isLoading, error } = useQuery<WorkItem[]>({
     queryKey: ["work-items", period, team],
@@ -109,40 +144,46 @@ export default function WorkItems({ period, team }: { period: string; team: stri
   const types = ["User Story", "Bug"];
   const states = [...new Set(allItems.map(w => w.state))].sort();
   const engineers = [...new Set(allItems.map(w => w.engineer_email))].sort();
+  const spilledOptions = ["Spilled", "Not spilled"];
+  const sprintSpanOptions = ["1 sprint", "2 sprints", "3 sprints", "4+ sprints"];
 
   // Apply state and type filters to root items only, keep Task children
   const preFiltered = allItems.filter(w => {
-    // Only Tasks are treated as children that bypass filters
     if (w.type === "Task" && w.parent_id && allItems.some(p => p.id === w.parent_id)) {
       return true;
     }
-    return (!filterState || w.state === filterState) &&
-           (!filterType || w.type === filterType);
+    if (selStates.size > 0 && !selStates.has(w.state)) return false;
+    if (selTypes.size > 0 && !selTypes.has(w.type)) return false;
+    return true;
   });
 
-  // Build hierarchy from all pre-filtered items
+  // Build hierarchy
   const tree = buildHierarchy(preFiltered);
 
-  // Apply engineer filter on the tree — show a root if it or any child matches
-  let filteredTree = filterEng
-    ? tree.filter(wi => matchesEngineer(wi, filterEng))
+  // Apply engineer filter — show root if it or any child matches any selected engineer
+  let filteredTree = selEngs.size > 0
+    ? tree.filter(wi => [...selEngs].some(eng => matchesEngineer(wi, eng)))
     : [...tree];
 
   // Apply spilled filter
-  if (filterSpilled === "spilled") {
+  if (selSpilled.has("Spilled") && !selSpilled.has("Not spilled")) {
     filteredTree = filteredTree.filter(wi => wi.spilled_from);
-  } else if (filterSpilled === "not-spilled") {
+  } else if (selSpilled.has("Not spilled") && !selSpilled.has("Spilled")) {
     filteredTree = filteredTree.filter(wi => !wi.spilled_from);
   }
 
   // Apply sprint span filter
-  if (filterSprints) {
-    const n = parseInt(filterSprints);
-    if (filterSprints === "4+") {
-      filteredTree = filteredTree.filter(wi => wi.sprints_active != null && wi.sprints_active >= 4);
-    } else if (!isNaN(n)) {
-      filteredTree = filteredTree.filter(wi => wi.sprints_active === n);
-    }
+  if (selSprints.size > 0) {
+    filteredTree = filteredTree.filter(wi => {
+      const s = wi.sprints_active;
+      if (s == null) return false;
+      for (const sel of selSprints) {
+        if (sel === "4+ sprints" && s >= 4) return true;
+        const n = parseInt(sel);
+        if (!isNaN(n) && s === n) return true;
+      }
+      return false;
+    });
   }
 
   // Sort: User Stories first, then Bugs
@@ -172,31 +213,17 @@ export default function WorkItems({ period, team }: { period: string; team: stri
         {team && <span className="team-badge">{team}</span>}
       </h2>
 
-      <div className="filter-bar">
-        <select value={filterEng} onChange={e => setFilterEng(e.target.value)}>
-          <option value="">All engineers</option>
-          {engineers.map(e => <option key={e} value={e}>{e}</option>)}
-        </select>
-        <select value={filterType} onChange={e => setFilterType(e.target.value)}>
-          <option value="">All types</option>
-          {types.map(t => <option key={t}>{t}</option>)}
-        </select>
-        <select value={filterState} onChange={e => setFilterState(e.target.value)}>
-          <option value="">All states</option>
-          {states.map(s => <option key={s}>{s}</option>)}
-        </select>
-        <select value={filterSpilled} onChange={e => setFilterSpilled(e.target.value)}>
-          <option value="">All items</option>
-          <option value="spilled">Spilled only</option>
-          <option value="not-spilled">Not spilled</option>
-        </select>
-        <select value={filterSprints} onChange={e => setFilterSprints(e.target.value)}>
-          <option value="">Any sprint span</option>
-          <option value="1">1 sprint</option>
-          <option value="2">2 sprints</option>
-          <option value="3">3 sprints</option>
-          <option value="4+">4+ sprints</option>
-        </select>
+      <div className="filter-section">
+        <ChipGroup label="Engineer" options={engineers} selected={selEngs}
+          onToggle={v => setSelEngs(toggle(selEngs, v))} />
+        <ChipGroup label="Type" options={types} selected={selTypes}
+          onToggle={v => setSelTypes(toggle(selTypes, v))} />
+        <ChipGroup label="State" options={states} selected={selStates}
+          onToggle={v => setSelStates(toggle(selStates, v))} />
+        <ChipGroup label="Spillover" options={spilledOptions} selected={selSpilled}
+          onToggle={v => setSelSpilled(toggle(selSpilled, v))} />
+        <ChipGroup label="Sprint span" options={sprintSpanOptions} selected={selSprints}
+          onToggle={v => setSelSprints(toggle(selSprints, v))} />
         <span className="filter-count">{itemCount} items</span>
       </div>
 

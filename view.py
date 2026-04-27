@@ -187,7 +187,7 @@ def work_items(from_date, to_date, sprint, team, eng, item_type, state):
                 SELECT DISTINCT area_path FROM work_items
                 WHERE period = ?
                 AND (area_path LIKE ? OR area_path LIKE ?)
-            """, (period, f"%{team}%", f"%Average Joe%" if "joe" in team.lower() else f"%{team}%")).fetchall()
+            """, (period, f"%{team}%", f"%{team.rstrip('s')}%")).fetchall()
 
             area_paths = [r["area_path"] for r in area_rows]
             if area_paths:
