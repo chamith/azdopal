@@ -12,7 +12,7 @@ repos/
 
 # Engineer output files
 engineers.json
-*.json
+*_*_*.json
 
 # Python
 __pycache__/
