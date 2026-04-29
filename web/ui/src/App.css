@@ -118,3 +118,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
 .chip-active:hover { background: #6a71e0; }
 .chip-clear { background: none; border: 1px solid #ddd; color: #aaa; font-size: 0.7rem; padding: 0.2rem 0.4rem; }
 .chip-clear:hover { color: #c62828; border-color: #c62828; }
+
+/* Sync button */
+.sync-btn { margin-left: 1rem; padding: 0.3rem 0.75rem; border: 1px solid #7c83fd; border-radius: 6px; background: #fff; color: #7c83fd; font-size: 0.8rem; cursor: pointer; font-weight: 600; transition: all 0.15s; }
+.sync-btn:hover:not(:disabled) { background: #7c83fd; color: #fff; }
+.sync-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.sync-msg { font-size: 0.78rem; color: #888; font-weight: 400; margin-left: 0.75rem; }

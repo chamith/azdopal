@@ -6,6 +6,14 @@ export async function get<T>(path: string, params?: Record<string, string>): Pro
   return res.json();
 }
 
+export async function post<T>(path: string, params?: Record<string, string>): Promise<T> {
+  const url = new URL(path, window.location.origin);
+  if (params) Object.entries(params).forEach(([k, v]) => v && url.searchParams.set(k, v));
+  const res = await fetch(url.toString(), { method: "POST" });
+  if (!res.ok) throw new Error(`API error ${res.status}`);
+  return res.json();
+}
+
 export interface Sprint {
   name: string;
   start_date: string;

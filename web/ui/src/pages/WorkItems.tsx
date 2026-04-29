@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { get } from "../api";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { get, post } from "../api";
 import type { WorkItem } from "../api";
 
 interface WorkItemWithChildren extends WorkItem {
@@ -96,11 +96,12 @@ function toggle<T>(set: Set<T>, value: T): Set<T> {
   return next;
 }
 
-function ChipGroup({ label, options, selected, onToggle }: {
+function ChipGroup({ label, options, selected, onToggle, counts }: {
   label: string;
   options: string[];
   selected: Set<string>;
   onToggle: (v: string) => void;
+  counts?: Map<string, number>;
 }) {
   return (
     <div className="chip-group">
@@ -111,7 +112,7 @@ function ChipGroup({ label, options, selected, onToggle }: {
           className={`chip ${selected.has(o) ? "chip-active" : ""}`}
           onClick={() => onToggle(o)}
         >
-          {o}
+          {o}{counts ? ` (${counts.get(o) ?? 0})` : ""}
         </button>
       ))}
       {selected.size > 0 && (
@@ -129,6 +130,25 @@ export default function WorkItems({ period, team }: { period: string; team: stri
   const [selEngs, setSelEngs] = useState<Set<string>>(new Set());
   const [selSpilled, setSelSpilled] = useState<Set<string>>(new Set());
   const [selSprints, setSelSprints] = useState<Set<string>>(new Set());
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+
+  const handleSync = async () => {
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      const res = await post<{ synced: number; message: string }>(
+        "/api/sync-work-items", { period, team }
+      );
+      setSyncMsg(res.message);
+      queryClient.invalidateQueries({ queryKey: ["work-items", period, team] });
+    } catch (e: unknown) {
+      setSyncMsg(e instanceof Error ? e.message : "Sync failed");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const { data = [], isLoading, error } = useQuery<WorkItem[]>({
     queryKey: ["work-items", period, team],
@@ -146,6 +166,9 @@ export default function WorkItems({ period, team }: { period: string; team: stri
   const engineers = [...new Set(allItems.map(w => w.engineer_email))].sort();
   const spilledOptions = ["Spilled", "Not spilled"];
   const sprintSpanOptions = ["1 sprint", "2 sprints", "3 sprints", "4+ sprints"];
+
+  // Build unfiltered hierarchy for filter options
+  const allRoots = buildHierarchy(allItems as WorkItemWithChildren[]);
 
   // Apply state and type filters to root items only, keep Task children
   const preFiltered = allItems.filter(w => {
@@ -186,6 +209,68 @@ export default function WorkItems({ period, team }: { period: string; team: stri
     });
   }
 
+  // Compute counts per filter option from the filtered results
+  // For each filter dimension, count against items filtered by all *other* dimensions
+  // so selecting "Active" updates engineer/type/spillover/sprint counts but not state counts.
+  const countBase = (skipFilter: string) => {
+    let items = [...allRoots];
+    if (skipFilter !== "type" && selTypes.size > 0)
+      items = items.filter(wi => selTypes.has(wi.type));
+    if (skipFilter !== "state" && selStates.size > 0)
+      items = items.filter(wi => selStates.has(wi.state));
+    if (skipFilter !== "engineer" && selEngs.size > 0)
+      items = items.filter(wi => [...selEngs].some(eng => matchesEngineer(wi, eng)));
+    if (skipFilter !== "spilled") {
+      if (selSpilled.has("Spilled") && !selSpilled.has("Not spilled"))
+        items = items.filter(wi => wi.spilled_from);
+      else if (selSpilled.has("Not spilled") && !selSpilled.has("Spilled"))
+        items = items.filter(wi => !wi.spilled_from);
+    }
+    if (skipFilter !== "sprints" && selSprints.size > 0) {
+      items = items.filter(wi => {
+        const s = wi.sprints_active;
+        if (s == null) return false;
+        for (const sel of selSprints) {
+          if (sel === "4+ sprints" && s >= 4) return true;
+          const n = parseInt(sel);
+          if (!isNaN(n) && s === n) return true;
+        }
+        return false;
+      });
+    }
+    return items;
+  };
+
+  const engCounts = new Map<string, number>();
+  for (const wi of countBase("engineer"))
+    engCounts.set(wi.engineer_email, (engCounts.get(wi.engineer_email) ?? 0) + 1);
+
+  const typeCounts = new Map<string, number>();
+  for (const wi of countBase("type"))
+    typeCounts.set(wi.type, (typeCounts.get(wi.type) ?? 0) + 1);
+
+  const stateCounts = new Map<string, number>();
+  for (const wi of countBase("state"))
+    stateCounts.set(wi.state, (stateCounts.get(wi.state) ?? 0) + 1);
+
+  const spilledCounts = new Map<string, number>([["Spilled", 0], ["Not spilled", 0]]);
+  for (const wi of countBase("spilled")) {
+    if (wi.spilled_from) spilledCounts.set("Spilled", spilledCounts.get("Spilled")! + 1);
+    else spilledCounts.set("Not spilled", spilledCounts.get("Not spilled")! + 1);
+  }
+
+  const sprintSpanCounts = new Map<string, number>();
+  for (const o of sprintSpanOptions) sprintSpanCounts.set(o, 0);
+  for (const wi of countBase("sprints")) {
+    const s = wi.sprints_active;
+    if (s != null) {
+      if (s >= 4) sprintSpanCounts.set("4+ sprints", sprintSpanCounts.get("4+ sprints")! + 1);
+      else if (s === 3) sprintSpanCounts.set("3 sprints", sprintSpanCounts.get("3 sprints")! + 1);
+      else if (s === 2) sprintSpanCounts.set("2 sprints", sprintSpanCounts.get("2 sprints")! + 1);
+      else if (s === 1) sprintSpanCounts.set("1 sprint", sprintSpanCounts.get("1 sprint")! + 1);
+    }
+  }
+
   // Sort: User Stories first, then Bugs
   filteredTree.sort((a, b) => {
     const order: Record<string, number> = { "User Story": 0, "Bug": 1 };
@@ -211,19 +296,23 @@ export default function WorkItems({ period, team }: { period: string; team: stri
       <h2 className="page-title">
         Work Items — <span className="period">{period}</span>
         {team && <span className="team-badge">{team}</span>}
+        <button className="sync-btn" onClick={handleSync} disabled={syncing || !period}>
+          {syncing ? "Syncing…" : "⟳ Sync"}
+        </button>
+        {syncMsg && <span className="sync-msg">{syncMsg}</span>}
       </h2>
 
       <div className="filter-section">
         <ChipGroup label="Engineer" options={engineers} selected={selEngs}
-          onToggle={v => setSelEngs(toggle(selEngs, v))} />
+          onToggle={v => setSelEngs(toggle(selEngs, v))} counts={engCounts} />
         <ChipGroup label="Type" options={types} selected={selTypes}
-          onToggle={v => setSelTypes(toggle(selTypes, v))} />
+          onToggle={v => setSelTypes(toggle(selTypes, v))} counts={typeCounts} />
         <ChipGroup label="State" options={states} selected={selStates}
-          onToggle={v => setSelStates(toggle(selStates, v))} />
+          onToggle={v => setSelStates(toggle(selStates, v))} counts={stateCounts} />
         <ChipGroup label="Spillover" options={spilledOptions} selected={selSpilled}
-          onToggle={v => setSelSpilled(toggle(selSpilled, v))} />
+          onToggle={v => setSelSpilled(toggle(selSpilled, v))} counts={spilledCounts} />
         <ChipGroup label="Sprint span" options={sprintSpanOptions} selected={selSprints}
-          onToggle={v => setSelSprints(toggle(selSprints, v))} />
+          onToggle={v => setSelSprints(toggle(selSprints, v))} counts={sprintSpanCounts} />
         <span className="filter-count">{itemCount} items</span>
       </div>
 

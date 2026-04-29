@@ -12,30 +12,30 @@ app = FastAPI(title="azdopal API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:3000"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
 
+_migrated = False
+
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    global _migrated
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
-    # Ensure parent_id column exists (migration)
-    try:
-        conn.execute("ALTER TABLE work_items ADD COLUMN parent_id INTEGER")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE work_items ADD COLUMN activated_date TEXT")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE work_items ADD COLUMN resolved_date TEXT")
-        conn.commit()
-    except Exception:
-        pass
+    if not _migrated:
+        # One-time migrations to ensure columns exist
+        for col, tbl in [
+            ("parent_id INTEGER", "work_items"),
+            ("activated_date TEXT", "work_items"),
+            ("resolved_date TEXT", "work_items"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col}")
+                conn.commit()
+            except Exception:
+                pass
+        _migrated = True
     return conn
 
 
@@ -286,27 +286,173 @@ def work_items(
                     sprints_active = sprint_count["cnt"] if sprint_count else 0
             item["sprints_active"] = sprints_active
 
-            # Detect spillover — was this item in the previous sprint in an active state?
+            # Detect spillover — was this item activated before the current sprint started?
             spilled_from = None
             if item.get("type") in ("User Story", "Bug") and item.get("state") not in ("New", "Closed"):
-                # Find the previous sprint
-                prev_sprint = conn.execute(
-                    "SELECT DISTINCT name FROM sprints "
-                    "WHERE start_date IS NOT NULL AND start_date < ("
-                    "  SELECT MIN(start_date) FROM sprints WHERE name = ?"
-                    ") ORDER BY start_date DESC LIMIT 1",
-                    (period,)
-                ).fetchone()
-                if prev_sprint:
-                    prev_name = prev_sprint["name"]
-                    prev_item = conn.execute(
-                        "SELECT state FROM work_items WHERE id = ? AND period = ? LIMIT 1",
-                        (item["id"], prev_name)
+                act = item.get("activated_date")
+                if act:
+                    act_date = act[:10]
+                    sprint_start_row = conn.execute(
+                        "SELECT MIN(start_date) as start_date FROM sprints WHERE name = ?",
+                        (period,)
                     ).fetchone()
-                    if prev_item and prev_item["state"] not in ("New", "Closed", "Removed"):
-                        spilled_from = prev_name
+                    if sprint_start_row and sprint_start_row["start_date"]:
+                        sprint_start = sprint_start_row["start_date"][:10]
+                        if act_date < sprint_start:
+                            # Find which sprint the item was likely in before this one
+                            prev_sprint = conn.execute(
+                                "SELECT DISTINCT name FROM sprints "
+                                "WHERE start_date IS NOT NULL AND start_date < ? "
+                                "AND end_date >= ? "
+                                "ORDER BY start_date DESC LIMIT 1",
+                                (sprint_start, act_date)
+                            ).fetchone()
+                            if prev_sprint:
+                                spilled_from = prev_sprint["name"]
+                            else:
+                                # Fallback: just use the immediately previous sprint
+                                prev_sprint = conn.execute(
+                                    "SELECT DISTINCT name FROM sprints "
+                                    "WHERE start_date IS NOT NULL AND start_date < ? "
+                                    "ORDER BY start_date DESC LIMIT 1",
+                                    (sprint_start,)
+                                ).fetchone()
+                                if prev_sprint:
+                                    spilled_from = prev_sprint["name"]
             item["spilled_from"] = spilled_from
 
             result.append(item)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Sync work items from ADO
+# ---------------------------------------------------------------------------
+
+@app.post("/api/sync-work-items")
+def sync_work_items(
+    period: str,
+    team: Optional[str] = None,
+):
+    """Fetch work items from ADO for the given sprint and save to DB."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from client import ADOClient
+    from db import (
+        init_db, get_connection, get_sprint_by_name, get_team_by_name,
+        upsert_work_item,
+    )
+
+    init_db()
+
+    fields = [
+        "System.Id", "System.Title", "System.WorkItemType",
+        "System.State", "System.AreaPath", "System.IterationPath",
+        "System.AssignedTo", "System.Parent",
+        "Microsoft.VSTS.Common.ActivatedDate",
+        "Microsoft.VSTS.Common.ClosedDate",
+        "Microsoft.VSTS.Scheduling.StoryPoints",
+        "Microsoft.VSTS.Scheduling.Effort",
+        "Microsoft.VSTS.Scheduling.RemainingWork",
+        "Microsoft.VSTS.Scheduling.OriginalEstimate",
+        "Microsoft.VSTS.Scheduling.CompletedWork",
+        "System.CreatedDate", "System.ChangedDate",
+    ]
+
+    try:
+        client = ADOClient()
+    except EnvironmentError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    with get_connection() as conn:
+        # Resolve sprint record — use team to scope the sprint lookup
+        team_name = None
+        if team:
+            t = get_team_by_name(conn, team)
+            if t:
+                team_name = t["name"]
+
+        sprint_record = get_sprint_by_name(conn, period, team_name) if period else None
+        if not sprint_record or not sprint_record.get("path"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not find iteration path for '{period}'. "
+                       "Run 'python3 fetch.py sync-sprints' first.",
+            )
+
+        iter_path = sprint_record["path"].replace("'", "''")
+        wiql = {
+            "query": (
+                f"SELECT [System.Id] FROM WorkItems "
+                f"WHERE [System.IterationPath] = '{iter_path}' "
+                f"ORDER BY [System.AssignedTo] ASC"
+            )
+        }
+
+        try:
+            result = client.post("/wit/wiql", wiql)
+        except RuntimeError as e:
+            raise HTTPException(status_code=502, detail=f"ADO query failed: {e}")
+
+        work_item_refs = result.get("workItems", [])
+        if not work_item_refs:
+            return {"synced": 0, "message": "No work items found in ADO for this sprint."}
+
+        ids = [r["id"] for r in work_item_refs]
+        synced = 0
+
+        # When team is specified, resolve matching area paths to filter items
+        team_filter = None
+        if team:
+            team_filter = team.lower()
+            # Also try without trailing 's' (e.g. "Average Joes" → "Average Joe")
+            team_filter_alt = team.rstrip("s").lower() if team.lower().endswith("s") else None
+
+        for batch_start in range(0, len(ids), 200):
+            batch = ids[batch_start:batch_start + 200]
+            try:
+                details = client.post("/wit/workitemsbatch", {"ids": batch, "fields": fields})
+            except RuntimeError as e:
+                raise HTTPException(status_code=502, detail=f"ADO batch fetch failed: {e}")
+
+            for item in details.get("value", []):
+                f = item.get("fields", {})
+                area_path = f.get("System.AreaPath", "")
+
+                # Filter by team area path if team is specified
+                if team_filter:
+                    ap_lower = area_path.lower()
+                    if team_filter not in ap_lower and (
+                        not team_filter_alt or team_filter_alt not in ap_lower
+                    ):
+                        continue
+
+                assigned = (f.get("System.AssignedTo") or {}).get("uniqueName", "unassigned")
+                wi_id = item.get("id")
+                wi = {
+                    "id": wi_id,
+                    "title": f.get("System.Title"),
+                    "type": f.get("System.WorkItemType"),
+                    "state": f.get("System.State"),
+                    "area_path": f.get("System.AreaPath"),
+                    "iteration_path": f.get("System.IterationPath"),
+                    "story_points": f.get("Microsoft.VSTS.Scheduling.StoryPoints"),
+                    "effort": f.get("Microsoft.VSTS.Scheduling.Effort"),
+                    "remaining_work": f.get("Microsoft.VSTS.Scheduling.RemainingWork"),
+                    "original_estimate": f.get("Microsoft.VSTS.Scheduling.OriginalEstimate"),
+                    "completed_work": f.get("Microsoft.VSTS.Scheduling.CompletedWork"),
+                    "parent_id": f.get("System.Parent"),
+                    "activated_date": f.get("Microsoft.VSTS.Common.ActivatedDate"),
+                    "resolved_date": f.get("Microsoft.VSTS.Common.ClosedDate"),
+                    "created_date": f.get("System.CreatedDate"),
+                    "changed_date": f.get("System.ChangedDate"),
+                    "url": f"https://dev.azure.com/{client.org}/{client.project}/_workitems/edit/{wi_id}",
+                }
+                upsert_work_item(conn, period, assigned, wi)
+                synced += 1
+
+            conn.commit()
+
+    scope = f" for {team}" if team else ""
+    return {"synced": synced, "message": f"Synced {synced} work items{scope} from ADO."}
