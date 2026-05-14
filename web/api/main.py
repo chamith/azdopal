@@ -456,3 +456,249 @@ def sync_work_items(
 
     scope = f" for {team}" if team else ""
     return {"synced": synced, "message": f"Synced {synced} work items{scope} from ADO."}
+
+
+# ---------------------------------------------------------------------------
+# Sprint capacity from ADO
+# ---------------------------------------------------------------------------
+
+@app.get("/api/capacity")
+def get_capacity(period: str, team: Optional[str] = None, hours_per_day: float = 6.0):
+    """Fetch team capacity for a sprint. Uses ADO capacity API if available,
+    otherwise calculates from team member count × working days × hours_per_day."""
+    import sys
+    import requests as req
+    from datetime import datetime, timedelta
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from client import ADOClient
+    from db import get_connection, get_sprint_by_name, get_team_by_name, get_team_member_emails
+
+    if not team:
+        raise HTTPException(status_code=400, detail="Team is required for capacity lookup.")
+
+    with get_connection() as conn:
+        t = get_team_by_name(conn, team)
+        if not t:
+            raise HTTPException(status_code=404, detail=f"Team '{team}' not found.")
+        team_name = t["name"]
+
+        sprint_record = get_sprint_by_name(conn, period, team_name)
+        if not sprint_record:
+            raise HTTPException(status_code=404, detail=f"Sprint '{period}' not found for team '{team_name}'.")
+        sprint_id = sprint_record["id"]
+
+        # Calculate working days in sprint
+        working_days = 0
+        if sprint_record.get("start_date") and sprint_record.get("end_date"):
+            start = datetime.fromisoformat(sprint_record["start_date"].replace("Z", "+00:00"))
+            end = datetime.fromisoformat(sprint_record["end_date"].replace("Z", "+00:00"))
+            d = start
+            while d <= end:
+                if d.weekday() < 5:
+                    working_days += 1
+                d += timedelta(days=1)
+
+        # Try ADO capacity API first
+        try:
+            client = ADOClient()
+            cap_url = (
+                f"https://dev.azure.com/{client.org}/{client.project}/{team_name}"
+                f"/_apis/work/teamsettings/iterations/{sprint_id}/capacities"
+            )
+            resp = req.get(cap_url, headers=client.headers, params={"api-version": "7.1"}, timeout=10)
+            if resp.ok:
+                members = resp.json().get("value", [])
+                if members:
+                    # ADO capacity is configured — use it
+                    total_capacity = 0.0
+                    member_capacities = []
+                    for m in members:
+                        identity = m.get("teamMember", {})
+                        email = identity.get("uniqueName", "")
+                        activities = m.get("activities", [])
+                        days_off = m.get("daysOff", [])
+                        hpd = sum(a.get("capacityPerDay", 0) for a in activities)
+                        off_days = 0
+                        for off in days_off:
+                            off_start = datetime.fromisoformat(off["start"].replace("Z", "+00:00"))
+                            off_end = datetime.fromisoformat(off["end"].replace("Z", "+00:00"))
+                            od = off_start
+                            while od < off_end:
+                                if od.weekday() < 5:
+                                    off_days += 1
+                                od += timedelta(days=1)
+                        member_total = hpd * (working_days - off_days)
+                        total_capacity += member_total
+                        if email:
+                            member_capacities.append({"email": email, "capacity_hours": member_total})
+                    return {
+                        "total_capacity_hours": total_capacity,
+                        "member_count": len(members),
+                        "working_days": working_days,
+                        "source": "ado",
+                        "members": member_capacities,
+                    }
+
+            # Fetch team days off to subtract from working days
+            # Check this team first, then also check other teams for shared holidays
+            off_dates: set = set()
+            team_days_off_url = (
+                f"https://dev.azure.com/{client.org}/{client.project}/{team_name}"
+                f"/_apis/work/teamsettings/iterations/{sprint_id}/teamdaysoff"
+            )
+            tdo_resp = req.get(team_days_off_url, headers=client.headers,
+                               params={"api-version": "7.1"}, timeout=10)
+            if tdo_resp.ok:
+                for off in tdo_resp.json().get("daysOff", []):
+                    off_start = datetime.fromisoformat(off["start"].replace("Z", "+00:00"))
+                    off_end = datetime.fromisoformat(off["end"].replace("Z", "+00:00"))
+                    od = off_start
+                    while od <= off_end:
+                        if od.weekday() < 5:
+                            off_dates.add(od.date())
+                        od += timedelta(days=1)
+
+            # If this team has no days off, check other teams for shared holidays
+            if not off_dates:
+                all_teams = conn.execute("SELECT DISTINCT team_name FROM sprints WHERE id = ?", (sprint_id,)).fetchall()
+                for row in all_teams:
+                    other_team = row["team_name"]
+                    if other_team == team_name or not other_team:
+                        continue
+                    other_url = (
+                        f"https://dev.azure.com/{client.org}/{client.project}/{other_team}"
+                        f"/_apis/work/teamsettings/iterations/{sprint_id}/teamdaysoff"
+                    )
+                    other_resp = req.get(other_url, headers=client.headers,
+                                         params={"api-version": "7.1"}, timeout=5)
+                    if other_resp.ok:
+                        for off in other_resp.json().get("daysOff", []):
+                            off_start = datetime.fromisoformat(off["start"].replace("Z", "+00:00"))
+                            off_end = datetime.fromisoformat(off["end"].replace("Z", "+00:00"))
+                            od = off_start
+                            while od <= off_end:
+                                if od.weekday() < 5:
+                                    off_dates.add(od.date())
+                                od += timedelta(days=1)
+                    if off_dates:
+                        break  # Found holidays from another team
+
+            working_days -= len(off_dates)
+        except Exception:
+            pass  # Fall through to calculated capacity
+
+        # Fallback: calculate from engineers with work items in this sprint × working days × hours_per_day
+        # Only assign capacity to engineers who are confirmed team members
+        if team_name:
+            area_rows = conn.execute(
+                "SELECT DISTINCT area_path FROM work_items WHERE period = ? "
+                "AND (area_path LIKE ? OR area_path LIKE ?)",
+                (period, f"%{team_name}%", f"%{team_name.rstrip('s')}%")
+            ).fetchall()
+            area_paths = [r["area_path"] for r in area_rows]
+            if area_paths:
+                ph = ",".join("?" * len(area_paths))
+                eng_rows = conn.execute(
+                    f"SELECT DISTINCT engineer_email FROM work_items "
+                    f"WHERE period = ? AND area_path IN ({ph}) AND engineer_email != 'unassigned'",
+                    [period] + area_paths
+                ).fetchall()
+                all_engineers = [r["engineer_email"] for r in eng_rows]
+            else:
+                all_engineers = []
+
+            # Get confirmed team members
+            confirmed_members = set(get_team_member_emails(conn, team_name))
+
+            # Build member list: confirmed members get full capacity, others get 0
+            per_member = working_days * hours_per_day
+            member_emails = []
+            for e in all_engineers:
+                if e.lower() in confirmed_members:
+                    member_emails.append({"email": e, "capacity_hours": per_member})
+                else:
+                    member_emails.append({"email": e, "capacity_hours": 0})
+
+            member_count = sum(1 for m in member_emails if m["capacity_hours"] > 0)
+            total_capacity = member_count * per_member
+        else:
+            member_list = get_team_member_emails(conn, team_name)
+            per_member = working_days * hours_per_day
+            member_count = len(member_list)
+            total_capacity = member_count * per_member
+            member_emails = [{"email": e, "capacity_hours": per_member} for e in member_list]
+
+    return {
+        "total_capacity_hours": total_capacity,
+        "member_count": member_count,
+        "working_days": working_days,
+        "hours_per_day": hours_per_day,
+        "source": "calculated",
+        "members": member_emails,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Sync code activity (commits & PRs) from ADO
+# ---------------------------------------------------------------------------
+
+@app.post("/api/sync-code")
+def sync_code(period: str, team: Optional[str] = None):
+    """Fetch commits & PRs from ADO for the given sprint and save to DB."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from client import ADOClient
+    from db import init_db, get_connection, get_all_repos
+    from engineer_activity import fetch_all_engineers_activity
+    from common import resolve_date_range
+
+    init_db()
+
+    try:
+        client = ADOClient()
+    except EnvironmentError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    with get_connection() as conn:
+        from db import get_sprint_by_name, get_team_by_name
+
+        # Resolve sprint dates
+        team_name = None
+        if team:
+            t = get_team_by_name(conn, team)
+            if t:
+                team_name = t["name"]
+
+        sprint_record = get_sprint_by_name(conn, period, team_name)
+        if not sprint_record or not sprint_record.get("start_date"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not find sprint dates for '{period}'. "
+                       "Run 'python3 fetch.py sync-sprints' first.",
+            )
+
+        from datetime import datetime
+        from_dt = datetime.fromisoformat(sprint_record["start_date"].replace("Z", "+00:00"))
+        to_dt = datetime.fromisoformat(sprint_record["end_date"].replace("Z", "+00:00"))
+
+        # Fetch for all engineers (not scoped to team) since repo scanning is per-repo anyway
+        engineers = None
+
+        repos_override = get_all_repos(conn) or None
+
+        results = fetch_all_engineers_activity(
+            client, engineers, from_dt, to_dt,
+            refresh_repos=(repos_override is None),
+            repos_override=repos_override,
+            conn=conn,
+        )
+
+    total_commits = sum(d["summary"]["total_commits"] for d in results.values())
+    total_prs = sum(d["summary"]["total_prs"] for d in results.values())
+    scope = f" for {team}" if team else ""
+    return {
+        "engineers": len(results),
+        "commits": total_commits,
+        "prs": total_prs,
+        "message": f"Synced {total_commits} commits, {total_prs} PRs from {len(results)} engineers{scope}.",
+    }

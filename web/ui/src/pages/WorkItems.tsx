@@ -40,6 +40,14 @@ function WICard({ wi, depth = 0 }: { wi: WorkItemWithChildren; depth?: number })
   const [collapsed, setCollapsed] = useState(depth === 0 && wi.children.length > 0);
   const hasChildren = wi.children.length > 0;
 
+  // Roll up hours from children for parent items
+  const childCompleted = hasChildren
+    ? wi.children.reduce((s, c) => s + (c.completed_work ?? 0), 0)
+    : null;
+  const childRemaining = hasChildren
+    ? wi.children.reduce((s, c) => s + (c.remaining_work ?? 0), 0)
+    : null;
+
   return (
     <div style={{ marginLeft: depth * 20 }}>
       <div className="wi-card">
@@ -61,8 +69,10 @@ function WICard({ wi, depth = 0 }: { wi: WorkItemWithChildren; depth?: number })
           <span className="wi-owner">{wi.engineer_email}</span>
           {wi.story_points != null && <span>SP: {wi.story_points}</span>}
           {wi.original_estimate != null && <span>Est: {wi.original_estimate}h</span>}
-          {wi.completed_work != null && <span>Done: {wi.completed_work}h</span>}
-          {wi.remaining_work != null && <span>Rem: {wi.remaining_work}h</span>}
+          {hasChildren && childCompleted != null && <span>Done: {childCompleted}h</span>}
+          {hasChildren && childRemaining != null && <span>Rem: {childRemaining}h</span>}
+          {!hasChildren && wi.completed_work != null && <span>Done: {wi.completed_work}h</span>}
+          {!hasChildren && wi.remaining_work != null && <span>Rem: {wi.remaining_work}h</span>}
           {wi.activated_date && <span>Active since: {wi.activated_date.slice(0, 10)}</span>}
           {wi.sprints_active != null && wi.sprints_active >= 1 && (
             <span className={`sprints-active ${wi.sprints_active > 2 ? "warn" : ""}`}>
@@ -155,6 +165,30 @@ export default function WorkItems({ period, team }: { period: string; team: stri
     queryFn: () => get("/api/work-items", { period, team }),
     enabled: !!period,
   });
+
+  const { data: capacityData } = useQuery<{
+    total_capacity_hours: number;
+    members?: { email: string; capacity_hours: number }[];
+  }>({
+    queryKey: ["capacity", period, team],
+    queryFn: () => get("/api/capacity", { period, team }),
+    enabled: !!period && !!team,
+  });
+
+  // Calculate capacity filtered by selected engineers
+  const filteredCapacity = (() => {
+    if (!capacityData) return null;
+    if (selEngs.size === 0) return capacityData.total_capacity_hours;
+    if (!capacityData.members || capacityData.members.length === 0) return capacityData.total_capacity_hours;
+    // Sum capacity for selected engineers only
+    let sum = 0;
+    for (const m of capacityData.members) {
+      if (selEngs.has(m.email)) {
+        sum += m.capacity_hours;
+      }
+    }
+    return sum;
+  })();
 
   if (!period) return <p className="empty">Select a sprint to get started.</p>;
   if (isLoading) return <p className="loading">Loading…</p>;
@@ -280,16 +314,25 @@ export default function WorkItems({ period, team }: { period: string; team: stri
   const itemCount = filteredTree.length;
 
   // Summary counts by status for stories and bugs only
-  const summaryMap: Record<string, { stories: number; bugs: number }> = {};
+  const summaryMap: Record<string, { stories: number; bugs: number; remaining: number; completed: number }> = {};
   for (const wi of filteredTree) {
     const status = wi.state;
-    if (!summaryMap[status]) summaryMap[status] = { stories: 0, bugs: 0 };
+    if (!summaryMap[status]) summaryMap[status] = { stories: 0, bugs: 0, remaining: 0, completed: 0 };
     if (wi.type === "User Story") summaryMap[status].stories++;
     else if (wi.type === "Bug") summaryMap[status].bugs++;
+    summaryMap[status].remaining += wi.remaining_work ?? 0;
+    summaryMap[status].completed += wi.completed_work ?? 0;
+    // Also sum children's hours
+    for (const child of wi.children) {
+      summaryMap[status].remaining += child.remaining_work ?? 0;
+      summaryMap[status].completed += child.completed_work ?? 0;
+    }
   }
   const summaryRows = Object.entries(summaryMap).sort((a, b) => a[0].localeCompare(b[0]));
   const totalStories = summaryRows.reduce((s, [, v]) => s + v.stories, 0);
   const totalBugs = summaryRows.reduce((s, [, v]) => s + v.bugs, 0);
+  const totalRemaining = summaryRows.reduce((s, [, v]) => s + v.remaining, 0);
+  const totalCompleted = summaryRows.reduce((s, [, v]) => s + v.completed, 0);
 
   return (
     <div>
@@ -340,6 +383,23 @@ export default function WorkItems({ period, team }: { period: string; team: stri
               <td key={status} className="num">{counts.bugs || "—"}</td>
             ))}
             <td className="num"><strong>{totalBugs}</strong></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <table className="data-table summary-table">
+        <thead>
+          <tr>
+            {filteredCapacity != null && <th className="num">Capacity (h)</th>}
+            <th className="num">Remaining (h)</th>
+            <th className="num">Completed (h)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            {filteredCapacity != null && <td className="num">{filteredCapacity.toFixed(1)}</td>}
+            <td className="num">{totalRemaining.toFixed(1)}</td>
+            <td className="num">{totalCompleted.toFixed(1)}</td>
           </tr>
         </tbody>
       </table>

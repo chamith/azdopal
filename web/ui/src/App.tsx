@@ -35,7 +35,7 @@ export default function App() {
       <header className="header">
         <span className="logo">azdopal</span>
         <nav className="nav">
-          <NavLink to={`/summary?${params}`}>Summary</NavLink>
+          <NavLink to={`/code?${params}`}>Code</NavLink>
           <NavLink to={`/work-items?${params}`}>Work Items</NavLink>
         </nav>
         <div className="filters">
@@ -59,7 +59,7 @@ export default function App() {
       <main className="main">
         <Routes>
           <Route path="/" element={<SprintSummary period={period} team={team} />} />
-          <Route path="/summary" element={<SprintSummary period={period} team={team} />} />
+          <Route path="/code" element={<SprintSummary period={period} team={team} />} />
           <Route path="/engineer/:email" element={<EngineerDetail period={period} />} />
           <Route path="/work-items" element={<WorkItems period={period} team={team} />} />
         </Routes>

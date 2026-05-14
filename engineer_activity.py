@@ -22,12 +22,28 @@ def _parse_dt(value: str) -> datetime | None:
 
 def _load_repos(repos_override: list[dict] | None) -> list[dict]:
     if repos_override is not None:
-        return repos_override
+        # Deduplicate by id
+        seen: set[str] = set()
+        unique = []
+        for r in repos_override:
+            rid = r.get("id") or r.get("name")
+            if rid not in seen:
+                seen.add(rid)
+                unique.append(r)
+        return unique
     if not REPO_CACHE.exists():
         sys.stderr.write("  Warning: repos.json not found. Run with --refresh-repos to build the cache.\n")
         sys.stderr.flush()
         return []
-    return json.loads(REPO_CACHE.read_text())
+    repos = json.loads(REPO_CACHE.read_text())
+    seen: set[str] = set()
+    unique = []
+    for r in repos:
+        rid = r.get("id") or r.get("name")
+        if rid not in seen:
+            seen.add(rid)
+            unique.append(r)
+    return unique
 
 
 def _make_summary(prs: list[dict], commits: list[dict]) -> dict:
@@ -371,27 +387,20 @@ def _refresh_repo_cache(client: ADOClient):
                 repos.append(r)
         sys.stderr.write(f"  Found {len(repos)} unique repos in existing cache.\n")
         sys.stderr.flush()
+        return  # Use cache if it exists
 
-    skip = len(repos)
-    top = 100
-    sys.stderr.write(f"  Fetching from ADO starting at offset {skip}...\n")
+    top = 1000
+    sys.stderr.write(f"  Fetching project repos from ADO...\n")
     sys.stderr.flush()
 
-    while True:
-        sys.stderr.write(f"  Fetching repos {skip + 1}–{skip + top}...\n")
-        sys.stderr.flush()
-        data = client.get("/git/repositories", {"$top": top, "$skip": skip})
-        page = data.get("value", [])
-        for r in page:
-            if r["id"] not in seen_ids:
-                seen_ids.add(r["id"])
-                repos.append(r)
-        REPO_CACHE.write_text(json.dumps(repos, indent=2))
-        sys.stderr.write(f"  Total unique repos so far: {len(repos)}\n")
-        sys.stderr.flush()
-        if len(page) < top:
-            break
-        skip += top
+    # Fetch repos scoped to the project (not the entire org)
+    data = client.get("/git/repositories")
+    page = data.get("value", [])
+    for r in page:
+        if r["id"] not in seen_ids and not r.get("isDisabled"):
+            seen_ids.add(r["id"])
+            repos.append(r)
 
+    REPO_CACHE.write_text(json.dumps(repos, indent=2))
     sys.stderr.write(f"  Done. {len(repos)} repos cached to {REPO_CACHE}.\n")
     sys.stderr.flush()

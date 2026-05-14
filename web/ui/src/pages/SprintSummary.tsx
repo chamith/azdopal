@@ -1,11 +1,29 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { get } from "../api";
+import { get, post } from "../api";
 import type { SummaryRow } from "../api";
 
 export default function SprintSummary({ period, team }: { period: string; team: string }) {
   const navigate = useNavigate();
   const [params] = useSearchParams();
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+
+  const handleSync = async () => {
+    setSyncing(true);
+    setSyncMsg(null);
+    try {
+      const res = await post<{ message: string }>("/api/sync-code", { period, team });
+      setSyncMsg(res.message);
+      queryClient.invalidateQueries({ queryKey: ["summary", period, team] });
+    } catch (e: unknown) {
+      setSyncMsg(e instanceof Error ? e.message : "Sync failed");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const { data = [], isLoading, error } = useQuery<SummaryRow[]>({
     queryKey: ["summary", period, team],
@@ -14,9 +32,21 @@ export default function SprintSummary({ period, team }: { period: string; team: 
   });
 
   if (!period) return <p className="empty">Select a sprint to get started.</p>;
-  if (isLoading) return <p className="loading">Loading…</p>;
-  if (error) return <p className="error">Failed to load summary.</p>;
-  if (!data.length) return <p className="empty">No data for this period.</p>;
+
+  const header = (
+    <h2 className="page-title">
+      Code — <span className="period">{period}</span>
+      {team && <span className="team-badge">{team}</span>}
+      <button className="sync-btn" onClick={handleSync} disabled={syncing || !period}>
+        {syncing ? "Syncing…" : "⟳ Sync"}
+      </button>
+      {syncMsg && <span className="sync-msg">{syncMsg}</span>}
+    </h2>
+  );
+
+  if (isLoading) return <div>{header}<p className="loading">Loading…</p></div>;
+  if (error) return <div>{header}<p className="error">Failed to load data.</p></div>;
+  if (!data.length) return <div>{header}<p className="empty">No data for this period. Try syncing.</p></div>;
 
   const totalCommits = data.reduce((s, r) => s + r.commits, 0);
   const totalPRs = data.reduce((s, r) => s + r.prs, 0);
@@ -28,10 +58,7 @@ export default function SprintSummary({ period, team }: { period: string; team: 
 
   return (
     <div>
-      <h2 className="page-title">
-        Sprint Summary — <span className="period">{period}</span>
-        {team && <span className="team-badge">{team}</span>}
-      </h2>
+      {header}
       <div className="stat-cards">
         <div className="stat-card"><div className="stat-value">{data.length}</div><div className="stat-label">Engineers</div></div>
         <div className="stat-card"><div className="stat-value">{totalCommits}</div><div className="stat-label">Commits</div></div>
