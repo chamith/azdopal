@@ -153,6 +153,7 @@ def _scan_repo(
     period: str,
     from_date: str,
     to_date: str,
+    skip_commits: bool = False,
 ):
     repo_id = repo["id"]
     repo_name = repo["name"]
@@ -212,54 +213,56 @@ def _scan_repo(
             repo_prs[creator_email][source_branch] += 1
 
     # --- Commits (all branches) ---
-    try:
-        refs_data = client.get(
-            f"/git/repositories/{repo_id}/refs",
-            {"filter": "heads/", "$top": 1000},
-        )
-        branches = [
-            r.get("name", "").replace("refs/heads/", "")
-            for r in refs_data.get("value", [])
-        ]
-    except RuntimeError:
-        branches = []
-
-    seen: dict[str, set] = defaultdict(set)
-
-    for branch in branches:
+    branches = []
+    if not skip_commits:
         try:
-            commits = client.get_paginated(
-                f"/git/repositories/{repo_id}/commits",
-                {
-                    "searchCriteria.fromDate": from_str,
-                    "searchCriteria.toDate": to_str,
-                    "searchCriteria.itemVersion.version": branch,
-                    "searchCriteria.itemVersion.versionType": "branch",
-                },
+            refs_data = client.get(
+                f"/git/repositories/{repo_id}/refs",
+                {"filter": "heads/", "$top": 1000},
             )
+            branches = [
+                r.get("name", "").replace("refs/heads/", "")
+                for r in refs_data.get("value", [])
+            ]
         except RuntimeError:
-            continue
+            branches = []
 
-        for c in commits:
-            author_email = c.get("author", {}).get("email", "").lower()
-            if not author_email:
+        seen: dict[str, set] = defaultdict(set)
+
+        for branch in branches:
+            try:
+                commits = client.get_paginated(
+                    f"/git/repositories/{repo_id}/commits",
+                    {
+                        "searchCriteria.fromDate": from_str,
+                        "searchCriteria.toDate": to_str,
+                        "searchCriteria.itemVersion.version": branch,
+                        "searchCriteria.itemVersion.versionType": "branch",
+                    },
+                )
+            except RuntimeError:
                 continue
-            if emails is not None and author_email not in emails:
-                continue
-            commit_id = c.get("commitId")
-            if commit_id in seen[author_email]:
-                continue
-            seen[author_email].add(commit_id)
-            entry = {
-                "repo": repo_name,
-                "branch": branch,
-                "commit_id": commit_id,
-                "message": (c.get("comment") or "").splitlines()[0],
-                "date": c.get("author", {}).get("date"),
-                "url": c.get("remoteUrl"),
-            }
-            commits_by_eng[author_email].append(entry)
-            repo_commits[author_email][branch] += 1
+
+            for c in commits:
+                author_email = c.get("author", {}).get("email", "").lower()
+                if not author_email:
+                    continue
+                if emails is not None and author_email not in emails:
+                    continue
+                commit_id = c.get("commitId")
+                if commit_id in seen[author_email]:
+                    continue
+                seen[author_email].add(commit_id)
+                entry = {
+                    "repo": repo_name,
+                    "branch": branch,
+                    "commit_id": commit_id,
+                    "message": (c.get("comment") or "").splitlines()[0],
+                    "date": c.get("author", {}).get("date"),
+                    "url": c.get("remoteUrl"),
+                }
+                commits_by_eng[author_email].append(entry)
+                repo_commits[author_email][branch] += 1
 
     # --- Flush this repo to DB ---
     if conn is not None:
@@ -306,6 +309,7 @@ def fetch_all_engineers_activity(
     refresh_repos: bool = False,
     repos_override: list[dict] | None = None,
     conn: sqlite3.Connection | None = None,
+    skip_commits: bool = False,
 ) -> dict[str, dict]:
     if refresh_repos:
         _refresh_repo_cache(client)
@@ -352,6 +356,7 @@ def fetch_all_engineers_activity(
             from_str, to_str,
             prs_by_eng, commits_by_eng,
             conn, period, from_date, to_date,
+            skip_commits=skip_commits,
         )
         sys.stderr.write(f"{pr_count} PRs, {commit_count} commits across {branch_count} branches\n")
         sys.stderr.flush()

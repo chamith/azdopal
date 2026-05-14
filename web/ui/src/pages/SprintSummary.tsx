@@ -9,13 +9,19 @@ export default function SprintSummary({ period, team }: { period: string; team: 
   const [params] = useSearchParams();
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  const [includeCommits, setIncludeCommits] = useState(false);
   const queryClient = useQueryClient();
 
   const handleSync = async () => {
     setSyncing(true);
     setSyncMsg(null);
     try {
-      const res = await post<{ message: string }>("/api/sync-code", { period, team });
+      const syncPrsOnly = !includeCommits;
+      const res = await post<{ message: string }>("/api/sync-code", {
+        period,
+        team,
+        sync_prs_only: String(syncPrsOnly),
+      });
       setSyncMsg(res.message);
       queryClient.invalidateQueries({ queryKey: ["summary", period, team] });
     } catch (e: unknown) {
@@ -40,6 +46,15 @@ export default function SprintSummary({ period, team }: { period: string; team: 
       <button className="sync-btn" onClick={handleSync} disabled={syncing || !period}>
         {syncing ? "Syncing…" : "⟳ Sync"}
       </button>
+      <label className="sync-toggle">
+        <input
+          type="checkbox"
+          checked={includeCommits}
+          onChange={(e) => setIncludeCommits(e.target.checked)}
+          disabled={syncing}
+        />
+        Include Commits
+      </label>
       {syncMsg && <span className="sync-msg">{syncMsg}</span>}
     </h2>
   );

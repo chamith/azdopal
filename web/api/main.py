@@ -643,7 +643,7 @@ def get_capacity(period: str, team: Optional[str] = None, hours_per_day: float =
 # ---------------------------------------------------------------------------
 
 @app.post("/api/sync-code")
-def sync_code(period: str, team: Optional[str] = None):
+def sync_code(period: str, team: Optional[str] = None, sync_prs_only: bool = True):
     """Fetch commits & PRs from ADO for the given sprint and save to DB."""
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -691,14 +691,19 @@ def sync_code(period: str, team: Optional[str] = None):
             refresh_repos=(repos_override is None),
             repos_override=repos_override,
             conn=conn,
+            skip_commits=sync_prs_only,
         )
 
     total_commits = sum(d["summary"]["total_commits"] for d in results.values())
     total_prs = sum(d["summary"]["total_prs"] for d in results.values())
     scope = f" for {team}" if team else ""
+    if sync_prs_only:
+        msg = f"Synced {total_prs} PRs from {len(results)} engineers{scope}."
+    else:
+        msg = f"Synced {total_commits} commits, {total_prs} PRs from {len(results)} engineers{scope}."
     return {
         "engineers": len(results),
         "commits": total_commits,
         "prs": total_prs,
-        "message": f"Synced {total_commits} commits, {total_prs} PRs from {len(results)} engineers{scope}.",
+        "message": msg,
     }
